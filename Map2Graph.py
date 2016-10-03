@@ -5,13 +5,13 @@ import rtree
 import argparse
 import sys
 import Dijkstra
-
+import igraph 
+import time
 class OSMNode():
     def __init__(self, nodeID, lon, lat):
         self.nodeID = nodeID
         self.lon = lon
         self.lat = lat
-    
     def __str__(self):
         return "OSMNode ID: %d \t Longitude: %f \t Latitude: %f\n" % (self.nodeID, self.lon, self.lat)
 
@@ -57,15 +57,15 @@ class Graph:
             self.index = rtree.index.Index(dbName)
 
     def addNode(self, node):
-        if not self.nodeDict.has_key(node.nodeID):
-            self.nodeDict[node.nodeID] = node
+        if not self.nodeDict.has_key(str(node.nodeID)):
+            self.nodeDict[str(node.nodeID)] = node
             self.numVertices += 1
 
     def addArc(self, srcID, dstID, dist, time):
-        if not self.arcDict.has_key((srcID, dstID)):
-            self.arcDict[(srcID, dstID)] = True
-            self.nodeDict[srcID].adjList[dstID] = dist
-            self.nodeDict[srcID].adjTimeList[dstID] = time
+        if not self.arcDict.has_key((str(srcID), str(dstID))):
+            self.arcDict[(str(srcID), str(dstID))] = True
+            self.nodeDict[str(srcID)].adjList[dstID] = dist
+            self.nodeDict[str(srcID)].adjTimeList[dstID] = time
         else:
             if self.duplicateArcDict.has_key((srcID, dstID)):
                 self.duplicateArcDict[(srcID, dstID)] += 1
@@ -99,7 +99,7 @@ class Graph:
                 thatNode = self.nodeDict[ids]
                 returnValue += "%d (%f, %f) \t %d (%f, %f) \t %f\n" %(thisNode.nodeID, thisNode.lon, thisNode.lat, thatNode.nodeID, thatNode.lon, thatNode.lat, thisNode.adjList[ids])
 
-        return returnValue 
+        return returnValue
 
 
 class GraphDB:
@@ -163,7 +163,6 @@ class Link():
         size = len(refs)
         # using while loop with index instead of for loop because we need to look at two nodes at a time
         while i < size -1:
-            
             lon1 = math.radians(refs[i].lon)
             lon2 = math.radians(refs[i+1].lon)
             lat1 = math.radians(refs[i].lat)
@@ -193,8 +192,6 @@ class Link():
 
 
 class linkTracker():
-
-
     def __init__(self):
         self.highwayList = []
         self.referencesDict = {} 
@@ -327,11 +324,39 @@ class linkTracker():
                             continue
                 j+= 1        
     
+def plot(graph, program_start_time):
+    startTime = time.time()
+    iGraph = igraph.Graph(directed=False)
 
+    iGraph.add_vertices(len(graph.nodeDict))
+    iGraph.vs["name"] = graph.nodeDict.keys()
+    iGraph.add_edges(graph.arcDict.keys())
+
+    mylayout = []
+
+    for keys in graph.nodeDict:
+        mylayout.append((graph.nodeDict[keys].lon, -(graph.nodeDict[keys].lat)))
+
+   
+
+    visual_style = {}
+    visual_style["vertex_size"] =3
+    visual_style["vertex_color"] = "blue"
+    visual_style["edge_color"] = "red"
+    visual_style["edge_curved"] = 0
+    visual_style["layout"] = mylayout
+    endTime = time.time()
+    dt = endTime - startTime
+    dtProgramTime = endTime - program_start_time
+    sys.stderr.write("Percentage of time required to build igraph: " + str((dt/dtProgramTime)*100)+ "%\n")
+
+    igraph.plot(iGraph, **visual_style)
+    return endTime
 
 
 
 def main():
+    programStartTime = time.time()
     argparser = argparse.ArgumentParser()
     argparser.add_argument("pbf_file", help="The pbf file that needs to be converted")
     argparser.add_argument("--distance", "-d", help="Outputs the distance between two nodes", action="store_true")
@@ -346,33 +371,48 @@ def main():
         raise argparse.ArgumentTypeError("Default Speed Limit  not in range.(DefaultSpeedLimit > 0)")
     
     tracker = linkTracker()
+    extractHighwayStart = time.time()
     p = OSMParser(ways_callback=tracker.extractHighway)
+    print("Collecting information about highways")
     #calling parse to collect information about highways
     p.parse(args.pbf_file)
+    extractHighwayEnd = time.time()
+    dtExtractHighway = extractHighwayEnd - extractHighwayStart
     
+    getNodeDataStart = time.time()
     q = OSMParser(coords_callback=tracker.getNodeData)
+    print("Collecting nodes informaion")
     #calling parse to collect information about the nodes associated with highways
     q.parse(args.pbf_file)
+    getNodeDataEnd = time.time()
+    dtNodeData = getNodeDataEnd - getNodeDataStart
 
     graph = Graph()
-    
+
+    #plot(graph, layout=layout)
+
+    print("Refining highways")
+    refineHighwayStart = time.time()
     #calling refineLinks to break down highways on the basis of intersections
     tracker.refineLinks(graph, args.defaultSpeedLimit)
+    refineHighwayEnd = time.time()
+    dtRefineHighway = refineHighwayEnd - refineHighwayStart
+
+    programEndTime = plot(graph, programStartTime)
+    dtProgramTime = programEndTime - programStartTime
+ 
     if(args.output != ""):
         sys.stdout = open(args.output, 'w')
     
     if(args.node):
-        for id in graph.nodeDict:
-            print("%d \t %f \t %f"%(id, graph.nodeDict[id].lat, graph.nodeDict[id].lon))
-    elif((not args.distance) and (not args.traversal_time)):
-         print(graph.toString(""))
-       # print(graph.__str__())
+        for id in graph.nodedict:
+            print("%d \t %f \t %f"%(id, graph.nodedict[id].lat, graph.nodedict[id].lon))
     elif(args.distance and (not args.traversal_time)):
-        print(graph.toString("d"))
+        print(graph.tostring("d"))
     elif((not args.distance) and args.traversal_time):
-        print(graph.toString("t"))
-    else:
-        print(graph.toString(""))
+        print(graph.tostring("t"))
+#   else:
+#       print(graph.tostring(""))
 
     
     #dj = Dijkstra.Dijkstra(graph, 115343360)
@@ -381,6 +421,9 @@ def main():
     #value = dj.getValue(10)
     #print(dj.getValue(10))
 
+    sys.stderr.write("Percentage of time taken to extract highway information: "+str((dtExtractHighway/dtProgramTime)*100) + "%\n")
+    sys.stderr.write("Percentage of time taken to extract node data: " + str((dtNodeData/dtProgramTime)*100) + "%\n")
+    sys.stderr.write("Percentage of time taken to refine highway: " + str((dtRefineHighway/dtProgramTime)*100) + "%\n")
 
     sys.stderr.write("Total Links: " + str(len(graph.arcDict))+ "\n")
     sys.stderr.write("Total OSM nodes: " + str(len(tracker.referencesNodeDict)) + "\n")
