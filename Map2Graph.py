@@ -18,10 +18,11 @@ class OSMNode():
 
 # A node is a OSMNode which lies in a intersection or is a dead end
 class Node(OSMNode):
-    def __init__(self, nodeID, lon, lat):
+    def __init__(self, nodeID, lon, lat, interpolated=False):
         self.nodeID = nodeID
         self.lon = lon
         self.lat = lat
+        self.interpolated = interpolated
         self.adjList = {} # adjacency list of the node with nodeID as key and the distance as value
         self.adjTimeList = {}  # adjacency list of the node with neighbor's nodeID as the key and the traversal time as value
 
@@ -32,11 +33,11 @@ class Node(OSMNode):
         returnValue = ""
         for ids in self.adjList:
             if(flag == "d" or flag == "D"):
-                returnValue += "%d \t %d \t %f\n" % (self.nodeID, ids, self.adjList[ids])
+                returnValue += "%s \t %s \t %f\n" % (self.nodeID, ids, self.adjList[ids])
             elif(flag == "t" or flag == "T"):
-                returnValue += "%d \t %d \t %s\n" % (self.nodeID, ids, str(self.adjTimeList[ids]))
+                returnValue += "%s \t %s \t %s\n" % (self.nodeID, ids, str(self.adjTimeList[ids]))
             else:
-                returnValue += "%d \t %d \t %f \t %s\n" % (self.nodeID, ids, self.adjList[ids], str(self.adjTimeList[ids]))
+                returnValue += "%s \t %s \t %f \t %s\n" % (self.nodeID, ids, self.adjList[ids], str(self.adjTimeList[ids]))
         return returnValue
 
     def __str__(self):
@@ -57,15 +58,19 @@ class Graph:
             self.index = rtree.index.Index(dbName)
 
     def addNode(self, node):
-        if not self.nodeDict.has_key(str(node.nodeID)):
-            self.nodeDict[str(node.nodeID)] = node
+        if not self.nodeDict.has_key(node.nodeID):
+            self.nodeDict[node.nodeID] = node
             self.numVertices += 1
 
     def addArc(self, srcID, dstID, dist, time):
-        if not self.arcDict.has_key((str(srcID), str(dstID))):
-            self.arcDict[(str(srcID), str(dstID))] = True
-            self.nodeDict[str(srcID)].adjList[dstID] = dist
-            self.nodeDict[str(srcID)].adjTimeList[dstID] = time
+        if not self.nodeDict.has_key(srcID):
+            raise KeyError("The node with ID " + srcID + " is not present in the graph")
+        if not self.nodeDict.has_key(dstID):
+            raise KeyError("The node with ID " + dstID + " is not present in the graph")
+        if not self.arcDict.has_key((srcID, dstID)):
+            self.arcDict[(srcID, dstID)] = True
+            self.nodeDict[srcID].adjList[dstID] = dist
+            self.nodeDict[srcID].adjTimeList[dstID] = time
         else:
             if self.duplicateArcDict.has_key((srcID, dstID)):
                 self.duplicateArcDict[(srcID, dstID)] += 1
@@ -74,16 +79,23 @@ class Graph:
             self.duplicateArcNum += 1
 
     def loadFromDB(self):
-        for node in self.index.intersections((-180, -90, 180, 90), 'raw'):
+        for node in self.index.intersection((-180, -90, 180, 90), objects="raw"):
+            print("entered first looop") 
             self.numVertices += 1
             self.nodeDict[node.nodeID] = node
             self.numArcs += len(node.adjList)
+        for node in self.nodeDict:
+            print("Entered second for loop")
             for edge in node.adjList:
                 self.arcDict[(node.nodeID, edge)] = True
+                self.addArc(node.nodeID, edge, node.adjList[edge], node.adjTimeList[edge])
+                
 
+    
     def buildRTree(self):
         for node in self.nodeDict.values():
-            self.index.insert(node.nodeID, node.getBB(), node)
+            print("inside buildrtree")
+            self.index.insert(long(node.nodeID), node.getBB(), obj=node)
     
     def toString(self, flag):
         returnValue = ""
@@ -97,26 +109,102 @@ class Graph:
             thisNode = self.nodeDict[node]
             for ids in self.nodeDict[node].adjList:
                 thatNode = self.nodeDict[ids]
-                returnValue += "%d (%f, %f) \t %d (%f, %f) \t %f\n" %(thisNode.nodeID, thisNode.lon, thisNode.lat, thatNode.nodeID, thatNode.lon, thatNode.lat, thisNode.adjList[ids])
+                returnValue += "%s (%f, %f) \t %s (%f, %f) \t %f\n" %(thisNode.nodeID, thisNode.lon, thisNode.lat, thatNode.nodeID, thatNode.lon, thatNode.lat, thisNode.adjList[ids])
 
         return returnValue
 
 
 class GraphDB:
     def __init__(self,dbName):
-        self.index = rtree.index.Index(dbName)
+        self.index = rtree.index.Rtree(dbName)
 
     def getGraph(self, bb=(-180, -90, 180, 90)):
         ret = Graph()
+        biggerBBox = (bb[0] - 0.01, bb[1] - 0.01 , bb[2] + 0.01 , bb[3] + 0.01)
+        biggerGraph = Graph()
 
         for node in self.index.intersection(bb, 'raw'):
             ret.addNode(node)
             ret.numArcs += len(node.adjList)
 
-            for edge in node.adjList:
-                ret.addArc(node.nodeID, edge, node.adjList[edge], node.adjTimeList[edge])
+        for node in self.index.intersection(biggerBBox, 'raw'):
+            biggerGraph.addNode(node)
+        interpolatedID =0
+        i=0
+        for node in ret.nodeDict.values():
+            for edge in node.adjList.keys():
+                if not ret.nodeDict.has_key(edge):
+                    if biggerGraph.nodeDict.has_key(edge):
+                        bbox = biggerGraph.nodeDict[edge].getBB()
+                        lon = bbox[0]
+                        lat = bbox[1]
+                        x1 = node.getBB()[0]
+                        y1 = node.getBB()[1]
+                        slope = (lat - y1) / (lon - x1)
+                        x2 =0
+                        y2 =0
+                        left = bb[0]
+                        bottom = bb[1]
+                        right = bb[2]
+                        top = bb[3]
+                        if (left <= lon) and (lon <= right):
+                            if lat < bottom:
+                                y2 = bottom
+                            elif lat > top:
+                                y2 = top
+                            x2 = ((y2 -y1)/slope) + x1
+                            if not ((left <= x2) and (x2 <= right) and (bottom <= y2) and (y2 <= top)): 
+                                raise ValueError("Interpolation Error: 1")
+                        else:
+                            if (bottom <= lat) and (lat <= top):
+                                if lon < left:
+                                    x2 = left
+                                elif lon > right:
+                                    x2 = right
+                                y2 = slope * (x2 -x1) + y1
+                                if not ((left <= x2) and (x2 <= right) and (bottom <= y2) and (y2 <= top)):
+                                    raise ValueError("Interpolation Error: 2")
+                            else:
+                                if (lon < left) and (lat > top):
+                                    x2 = left
+                                    y2 = slope * (x2 -x1) + y1
+                                    if not ((bottom <= y2) and (y2 <= top)):
+                                        y2 = top
+                                        x2 = ((y2-y1)/slope) + x1
+                                        if not((left <= x2) and (x2 <= top)):
+                                            raise ValueError("Interpolation Error: 3")
+                                elif (lon < left) and (lat < bottom):
+                                    x2 = left
+                                    y2 = slope * (x2 - x1) + y1
+                                    if not ((bottom <= y2) and (y2 <= top)):
+                                        y2 = bottom 
+                                        x2 = ((y2-y1)/slope) + x1
+                                        if not ((left <= x2) and (x2 <= top)):
+                                            raise ValueError("Interpolation Error: 4")
+                                elif ((lon > right) and (lat > top)):
+                                    x2 = right
+                                    y2 = slope * (x2- x1) + y1
+                                    if not ((bottom <= y2) and (y2 <= top)):
+                                        y2 = top
+                                        x2 = ((y2-y1)/slope) + x1
+                                        if not ((left <= x2) and (x2 <= top)):
+                                            raise ValueError("Interpolation Error: 5")
+                                elif ((lon > right) and (lat < bottom)):
+                                    x2 = right
+                                    y2 = slope * (x2- x1) + y1
+                                    if not ((bottom <= y2) and (y2 <= top)):
+                                        y2 = bottom
+                                        x2 = ((y2-y1)/slope) + x1
+                                        if not ((left <= x2) and (x2<= top)):
+                                            raise ValueError("Interpolation Error: 6")
+                    interpolatedNode = Node(str(i), x2, y2, True)
+                    i+= 1
+                    ret.addNode(interpolatedNode)
+                    ret.addArc(node.nodeID, interpolatedNode.nodeID,-1, -1)
+                    continue
+                ret.addArc(node.nodeID, ret.nodeDict[edge].nodeID, node.adjList[edge], node.adjTimeList[edge])
         return ret
-
+    ###
 
 
 
@@ -191,6 +279,25 @@ class Link():
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 class linkTracker():
     def __init__(self):
         self.highwayList = []
@@ -208,48 +315,47 @@ class linkTracker():
         for osmid, tags, refs in ways:
 
             if 'highway' in tags:
-                if (len(refs) == 1):
-                    highwayID = refs[0]
-                else:
+                if (len(refs) > 1):
                     highwayID = (refs[0], refs[len(refs) -1])
-                if tags['highway'] == 'motorway' or tags['highway'] == 'roundabout':
-                    # if the highway has maxspeed tag then set speedLimit to the given speedLimit else set speedLimit to undefined
-                    if 'maxspeed' in tags:
-                        temp = Link(highwayID, refs, 'forward', 0, tags['maxspeed'])
-                    else:
-                        temp = Link(highwayID, refs, 'forward', 0, -1)
-                elif 'oneway' in tags:
-                    # assigning the length of highways to zero as we
-                    #   are not interested in their length
-                    if tags['oneway'] == 'yes' or tags['oneway'] == 1 or tags['oneway'] == 'true':
+                    refs = map(str, refs)
+                    if tags['highway'] == 'motorway' or tags['highway'] == 'roundabout':
+                        # if the highway has maxspeed tag then set speedLimit to the given speedLimit else set speedLimit to undefined
                         if 'maxspeed' in tags:
                             temp = Link(highwayID, refs, 'forward', 0, tags['maxspeed'])
-                        else: 
+                        else:
                             temp = Link(highwayID, refs, 'forward', 0, -1)
-                    elif tags['oneway'] == 'no' or tags['oneway'] == 0 or tags['oneway'] == 'false' or tags['oneway'] == 'reversible':
-                        if 'maxspeed' in tags:
-                            temp = Link(highwayID, refs,'bidirectional',0, tags['maxspeed'])
-                        else:
-                            temp = Link(highwayID, refs, 'bidirectional', 0, -1)
+                    elif 'oneway' in tags:
+                        # assigning the length of highways to zero as we
+                        #   are not interested in their length
+                        if tags['oneway'] == 'yes' or tags['oneway'] == 1 or tags['oneway'] == 'true':
+                            if 'maxspeed' in tags:
+                                temp = Link(highwayID, refs, 'forward', 0, tags['maxspeed'])
+                            else: 
+                                temp = Link(highwayID, refs, 'forward', 0, -1)
+                        elif tags['oneway'] == 'no' or tags['oneway'] == 0 or tags['oneway'] == 'false' or tags['oneway'] == 'reversible':
+                            if 'maxspeed' in tags:
+                                temp = Link(highwayID, refs,'bidirectional',0, tags['maxspeed'])
+                            else:
+                                temp = Link(highwayID, refs, 'bidirectional', 0, -1)
 
+                        else:
+                            if 'maxspeed' in tags:
+                                temp = Link(highwayID, refs, 'backwards', 0, tags['maxspeed'])
+                            else:
+                                temp = Link(highwayID, refs, 'backwards', 0, -1)
                     else:
                         if 'maxspeed' in tags:
-                            temp = Link(highwayID, refs, 'backwards', 0, tags['maxspeed'])
+                            temp = Link(highwayID, refs, 'bidirectional',0, tags['maxspeed'])
                         else:
-                            temp = Link(highwayID, refs, 'backwards', 0, -1)
-                else:
-                    if 'maxspeed' in tags:
-                        temp = Link(highwayID, refs, 'bidirectional',0, tags['maxspeed'])
-                    else:
-                        temp = Link(highwayID, refs, 'bidirectional',0, -1)
-                    
-                self.highwayList.append(temp)
-                for refID in refs:
-                    if self.referencesDict.has_key(refID):
-                        self.referencesDict[refID] += 1
-                    else:
-                        self.referencesDict[refID] = 1
-    
+                            temp = Link(highwayID, refs, 'bidirectional',0, -1)
+                        
+                    self.highwayList.append(temp)
+                    for refID in refs:
+                        if self.referencesDict.has_key(refID):
+                            self.referencesDict[refID] += 1
+                        else:
+                            self.referencesDict[refID] = 1
+        
 
 
     # this function gets coordinates for all the nodes associated with highways
@@ -257,9 +363,10 @@ class linkTracker():
     #   with node id as key and the OSMNode object as value
     def getNodeData(self, coords):
         for osmid, lon, lat in coords:
+            osmid = str(osmid)
             if osmid in self.referencesDict: 
-                tempNode = OSMNode(osmid, lon, lat)
-                self.referencesNodeDict[osmid] = tempNode
+                tempNode = OSMNode(str(osmid), lon, lat)
+                self.referencesNodeDict[str(osmid)] = tempNode
 
 
 
@@ -311,10 +418,10 @@ class linkTracker():
                         graph.addNode(node2)
                         # adding second node in the adjacent list of first node 
                         if(highway.oneway == 'forward' or highway.oneway == 'bidirectional'):
-                            graph.addArc(refs[0].nodeID, refs[len(refs) -1].nodeID, linkLength, linkTraversalTime)
+                            graph.addArc(refs[0].nodeID, refs[-1].nodeID, linkLength, linkTraversalTime)
                         if(highway.oneway == 'backwards' or highway.oneway == 'bidirectional'):
                             # adding first node in the adjacent list of the second node
-                            graph.addArc(refs[len(refs) -1].nodeID, refs[0].nodeID, linkLength, linkTraversalTime)
+                            graph.addArc(refs[-1].nodeID, refs[0].nodeID, linkLength, linkTraversalTime)
                         self.refinedLinkList.append(temp)
                         del refs[:]
                         
@@ -387,7 +494,7 @@ def main():
     getNodeDataEnd = time.time()
     dtNodeData = getNodeDataEnd - getNodeDataStart
 
-    graph = Graph()
+    graph = Graph("uno") 
 
     #plot(graph, layout=layout)
 
@@ -403,7 +510,9 @@ def main():
  
     if(args.output != ""):
         sys.stdout = open(args.output, 'w')
-    
+   
+
+    graph.buildRTree()
     if(args.node):
         for id in graph.nodedict:
             print("%d \t %f \t %f"%(id, graph.nodedict[id].lat, graph.nodedict[id].lon))
@@ -411,8 +520,8 @@ def main():
         print(graph.tostring("d"))
     elif((not args.distance) and args.traversal_time):
         print(graph.tostring("t"))
-#   else:
-#       print(graph.tostring(""))
+    else:
+        print(graph.toString(""))
 
     
     #dj = Dijkstra.Dijkstra(graph, 115343360)
@@ -420,10 +529,9 @@ def main():
     #dj.dijkstra()
     #value = dj.getValue(10)
     #print(dj.getValue(10))
-
     sys.stderr.write("Percentage of time taken to extract highway information: "+str((dtExtractHighway/dtProgramTime)*100) + "%\n")
     sys.stderr.write("Percentage of time taken to extract node data: " + str((dtNodeData/dtProgramTime)*100) + "%\n")
-    sys.stderr.write("Percentage of time taken to refine highway: " + str((dtRefineHighway/dtProgramTime)*100) + "%\n")
+#   sys.stderr.write("Percentage of time taken to refine highway: " + str((dtRefineHighway/dtProgramTime)*100) + "%\n")
 
     sys.stderr.write("Total Links: " + str(len(graph.arcDict))+ "\n")
     sys.stderr.write("Total OSM nodes: " + str(len(tracker.referencesNodeDict)) + "\n")
